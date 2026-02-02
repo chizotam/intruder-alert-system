@@ -20,51 +20,59 @@ except Exception as e:
 
 
 def init_tables():
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS credentials (
-        id SERIAL PRIMARY KEY,
-        type VARCHAR(10),
-        value_hash VARCHAR(255),
-        question VARCHAR(255),
-        answer_hash VARCHAR(255),
-        email VARCHAR(255),
-        blocked BOOLEAN DEFAULT FALSE
-    )
-    """)
+    try:
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS credentials (
+            id SERIAL PRIMARY KEY,
+            type VARCHAR(10),
+            value_hash VARCHAR(255),
+            question VARCHAR(255),
+            answer_hash VARCHAR(255),
+            email VARCHAR(255),
+            blocked BOOLEAN DEFAULT FALSE
+        )
+        """)
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS intruder_logs (
-        id SERIAL PRIMARY KEY,
-        action VARCHAR(255),
-        ip VARCHAR(50),
-        email VARCHAR(255),
-        time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS intruder_logs (
+            id SERIAL PRIMARY KEY,
+            action VARCHAR(255),
+            ip VARCHAR(50),
+            email VARCHAR(255),
+            time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS user_devices (
-        id SERIAL PRIMARY KEY,
-        email VARCHAR(255) NOT NULL,
-        device_id VARCHAR(255) NOT NULL,
-        last_login TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(email, device_id)
-    )
-    """)
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_devices (
+            id SERIAL PRIMARY KEY,
+            email VARCHAR(255) NOT NULL,
+            device_id VARCHAR(255) NOT NULL,
+            last_login TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(email, device_id)
+        )
+        """)
 
-    db.commit()
+        db.commit()
+    except Exception as e:
+        print(f"[DB ERROR] init_tables failed: {e}")
+        db.rollback()
 
 
 #  LOG ACTIONS 
-def log_action(action, ip, email):
+def log_action(action, ip, email=None):
     """
     Logs any action (login failed, intruder alert, login successful)
     """
-    cursor.execute(
-        "INSERT INTO intruder_logs (action, ip, email) VALUES (%s, %s, %s)",
-        (action, ip, email)
-    )
-    db.commit()
+    try:
+        cursor.execute(
+            "INSERT INTO intruder_logs (action, ip, email) VALUES (%s, %s, %s)",
+            (action, ip, email)
+        )
+        db.commit()
+    except Exception as e:
+        print(f"[DB ERROR] log_action failed: {e}")
+        db.rollback()
 
 
 #  PASSWORD / PIN HASHING 
@@ -107,16 +115,24 @@ def block_user(email: str):
     """
     Marks a user as blocked
     """
-    cursor.execute("UPDATE credentials SET blocked=TRUE WHERE email=%s", (email,))
-    db.commit()
+    try:
+        cursor.execute("UPDATE credentials SET blocked=TRUE WHERE email=%s", (email,))
+        db.commit()
+    except Exception as e:
+        print(f"[DB ERROR] block_user failed: {e}")
+        db.rollback()
 
 
 def unblock_user(email: str):
     """
     Unblocks a user
     """
-    cursor.execute("UPDATE credentials SET blocked=FALSE WHERE email=%s", (email,))
-    db.commit()
+    try:
+        cursor.execute("UPDATE credentials SET blocked=FALSE WHERE email=%s", (email,))
+        db.commit()
+    except Exception as e:
+        print(f"[DB ERROR] unblock_user failed: {e}")
+        db.rollback()
 
 
 #  INIT 
