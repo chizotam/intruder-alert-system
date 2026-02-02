@@ -1,7 +1,10 @@
-Flask
+Flask==3.1.2
 gunicorn
-psycopg2-binary
-bcrypt
-Flask-Bcrypt
-requests
+psycopg2-binary==2.9.11
+bcrypt==5.0.0
+Flask-Bcrypt==1.0.1
+requests==2.32.5
 user-agents
+
+
+

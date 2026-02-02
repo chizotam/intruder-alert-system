@@ -1,29 +1,28 @@
-import mysql.connector
-from mysql.connector import Error
-from datetime import datetime
+import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import bcrypt
 
-#  DATABASE CONNECTION 
+# PostgreSQL connection from Render environment
 try:
-    db = mysql.connector.connect(
-        host="localhost",
-        user="root",
-        password="Tobechukwu1_",  
-        database="access_control_streamlit"  
+    db = psycopg2.connect(
+        host=os.environ["DB_HOST"],
+        database=os.environ["DB_NAME"],
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASS"],
+        port=os.environ.get("DB_PORT", "5432")
     )
-    cursor = db.cursor(dictionary=True)
-    print("Connected to MySQL database.")
-except Error as e:
-    print("Error connecting to MySQL:", e)
+    cursor = db.cursor(cursor_factory=RealDictCursor)
+    print("Connected to PostgreSQL database.")
+except Exception as e:
+    print("Error connecting to PostgreSQL:", e)
     exit()
 
 
-#  TABLE CREATION 
 def init_tables():
-    # Credentials table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS credentials (
-        id INT AUTO_INCREMENT PRIMARY KEY,
+        id SERIAL PRIMARY KEY,
         type VARCHAR(10),
         value_hash VARCHAR(255),
         question VARCHAR(255),
@@ -32,23 +31,32 @@ def init_tables():
         blocked BOOLEAN DEFAULT FALSE
     )
     """)
-    
-    # Intruder logs table
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS intruder_logs (
-        id INT AUTO_INCREMENT PRIMARY KEY,
+        id SERIAL PRIMARY KEY,
         action VARCHAR(255),
         ip VARCHAR(50),
         email VARCHAR(255),
         time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
-    
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS user_devices (
+        id SERIAL PRIMARY KEY,
+        email VARCHAR(255) NOT NULL,
+        device_id VARCHAR(255) NOT NULL,
+        last_login TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(email, device_id)
+    )
+    """)
+
     db.commit()
 
 
 #  LOG ACTIONS 
-def log_action(action, ip, email=None):
+def log_action(action, ip, email):
     """
     Logs any action (login failed, intruder alert, login successful)
     """
