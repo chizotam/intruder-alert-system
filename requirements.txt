@@ -1,0 +1,7 @@
+Flask
+gunicorn
+psycopg2-binary
+bcrypt
+Flask-Bcrypt
+requests
+user-agents
