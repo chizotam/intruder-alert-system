@@ -9,11 +9,11 @@ from email.message import EmailMessage
 import random
 import re
 import base64
-
+import os
 
 
 app = Flask(__name__)
-app.secret_key = "SUPER_SECRET_KEY"
+app.secret_key = os.environ.get("FLASK_SECRET_KEY")
 bcrypt.init_app(app)
 app.permanent_session_lifetime = timedelta(minutes=5)
 
@@ -25,8 +25,8 @@ OTP_EXPIRY_SECONDS = 300  # 5 minutes
 MAX_OTP_ATTEMPTS = 3
 
 def send_email_otp(target_email, otp_code):
-    SENDER_EMAIL = "chizotamubochi@gmail.com"
-    SENDER_PASS = "bcxb qeaj oekt avmu"
+    SENDER_EMAIL = os.environ["EMAIL_USER"]
+    SENDER_PASS = os.environ["EMAIL_PASS"]
     msg = EmailMessage()
     msg['Subject'] = "Zsafe Credential Reset OTP"
     msg['From'] = SENDER_EMAIL
@@ -387,29 +387,6 @@ def logout():
     flash("System locked", "info")
     return redirect("/login")
 
-#  BACKEND TERMINAL
-def backend_console():
-    while True:
-        cmd = input("[TERMINAL] Enter command: ").strip()
-        if cmd.lower() == "blocked users":
-            if blocked_users:
-                print("[BLOCKED USERS]")
-                for u in blocked_users:
-                    print(f"- {u}")
-            else:
-                print("[INFO] No blocked users")
-        elif cmd.lower().startswith("unblock "):
-            email = cmd.split(" ", 1)[1].strip()
-            if email in blocked_users:
-                blocked_users.remove(email)
-                failed_attempts[email] = 0
-                print(f"[INFO] {email} has been unblocked")
-            else:
-                print(f"[INFO] {email} is not blocked")
-        else:
-            print("[INFO] Commands: 'blocked users', 'unblock <email>'")
-
-threading.Thread(target=backend_console, daemon=True).start()
 
 if __name__ == "__main__":
     app.run(debug=True, use_reloader=False)
