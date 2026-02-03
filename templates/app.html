@@ -204,7 +204,6 @@
         </div>
     {% endif %}
 
-    <!-- The rest of your HTML stays the same -->
     {% if page == "forgot" %}
         <h2>Request OTP</h2>
         <p>Click below to send an OTP to your email.</p>
@@ -218,7 +217,13 @@
 
     {% if page == "verify_otp" %}
         <h2>Verify OTP</h2>
-        <p>Enter the OTP sent to your email.</p>
+        <p style="color:#f9a825; text-align:center;">
+            {% if session.get('new_device_email') %}
+                New device detected. Enter OTP sent to your email.
+            {% else %}
+                Enter OTP sent to your email.
+            {% endif %}
+        </p>
         <form method="POST">
             <input type="text" name="otp" placeholder="Enter OTP" required>
             <button>Verify OTP</button>
@@ -347,6 +352,27 @@
             const blockedInterval = setInterval(updateBlockedTimer, 1000);
             updateBlockedTimer();
         </script>
+    {% endif %}
+
+    {% if page == "not_you" %}
+        <h2>New Device Alert</h2>
+        <p style="text-align:center; margin-bottom:20px; color:#f9a825;">
+            A login attempt from a new device was detected. 
+            Do you want to block your account and change your credential?
+        </p>
+        <form method="POST" action="/not_you" style="display:flex; flex-direction:column; gap:10px;">
+            <button type="submit" name="action" value="block" style="background-color: var(--danger);">
+                Block Account
+            </button>
+            <button type="submit" name="action" value="reset" style="background-color: var(--info);">
+                Change Credential
+            </button>
+        </form>
+        {% if session.get('blocked_until') %}
+            <p class="blocked-info" style="text-align:center; margin-top:15px;">
+                Your account has been blocked due to a new device login attempt.
+            </p>
+        {% endif %}
     {% endif %}
 
 </div>

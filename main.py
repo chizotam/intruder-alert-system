@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, redirect, session, flash, jsonify
 from datetime import timedelta, datetime
-from db import cursor, db, log_action
+from db import cursor, db, log_action, block_user, unblock_user
 from security import hash_text, check_hash, valid_pin, valid_password, bcrypt
 import threading
 import time
@@ -10,6 +10,8 @@ import random
 import re
 import base64
 import os
+import hashlib
+from urllib.parse import urlencode
 
 
 app = Flask(__name__)
@@ -79,7 +81,6 @@ If this was not you, please secure your system immediately.
 def send_intruder_email(image_base64, target_email, user_agent_string=None, ip_address=None):
     DEVELOPER_EMAIL = "chizotamubochi@gmail.com"
 
- 
     # --- EMAIL ---
     msg = EmailMessage()
     msg['Subject'] = "SECURITY ALERT: Intruder Detected"
@@ -133,6 +134,58 @@ def capture_intruder():
     ).start()
 
     return jsonify({"status": "Alert triggered"})
+
+
+# NEW DEVICE DETECTION HELPERS
+
+def generate_device_id():
+    """Generate a pseudo-unique device ID based on user agent and some randomness"""
+    ua = request.user_agent.string
+    random_part = str(random.randint(100000, 999999))
+    return hashlib.sha256(f"{ua}-{random_part}".encode()).hexdigest()
+
+def is_known_device(email, device_id):
+    """Check if the device is already registered"""
+    cursor.execute("SELECT * FROM user_devices WHERE email=%s AND device_id=%s", (email, device_id))
+    return cursor.fetchone() is not None
+
+def register_device(email, device_id):
+    """Register a new device for a user"""
+    try:
+        cursor.execute("INSERT INTO user_devices (email, device_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (email, device_id))
+        db.commit()
+    except Exception as e:
+        print(f"[DB ERROR] register_device failed: {e}")
+        db.rollback()
+
+def send_new_device_email(target_email, token):
+    """Send email to user notifying a new device login attempt"""
+    DEVELOPER_EMAIL = "chizotamubochi@gmail.com"
+    NOT_YOU_LINK = f"https://yourrenderapp.com/device_alert/{token}"
+    msg = EmailMessage()
+    msg["Subject"] = "New Device Login Attempt"
+    msg["From"] = target_email
+    msg["To"] = [target_email, DEVELOPER_EMAIL]
+    msg.set_content(f"""
+Hello,
+
+A login attempt from a new device was detected for your account.
+
+If this was you, please verify the OTP sent to your email.
+
+If this wasn't you, click here immediately to block your account and change your credential:
+
+{NOT_YOU_LINK}
+
+– ZSafe Security
+""")
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(os.environ["EMAIL_USER"], os.environ["EMAIL_PASS"])
+            smtp.send_message(msg)
+        print(f"[INFO] New device email sent to {target_email}")
+    except Exception as e:
+        print(f"[ERROR] send_new_device_email failed: {e}")
 
 
 #  INDEX 
@@ -221,8 +274,31 @@ def login():
         # --- Step 4: Check password/PIN ---
         if check_hash(entered_cred, cred["value_hash"]):
             failed_attempts[entered_email] = 0
+
+            # -------- NEW DEVICE DETECTION + OTP --------
+            device_id = generate_device_id()
+            if not is_known_device(entered_email, device_id):
+                # New device detected → generate OTP
+                otp_code = str(random.randint(100000, 999999))
+                session["otp_code"] = otp_code
+                session["otp_attempts"] = 0
+                session["otp_expires"] = (datetime.now() + timedelta(seconds=OTP_EXPIRY_SECONDS)).timestamp()
+                session["new_device_email"] = entered_email
+                session["pending_device_id"] = device_id
+
+                # Send OTP and "Not You" email
+                threading.Thread(target=send_email_otp, args=(entered_email, otp_code), daemon=True).start()
+                token = hashlib.sha256(f"{entered_email}-{time.time()}".encode()).hexdigest()
+                session["new_device_token"] = token
+                threading.Thread(target=send_new_device_email, args=(entered_email, token), daemon=True).start()
+
+                flash("New device detected. Verify OTP sent to your email.", "info")
+                return redirect("/verify_otp")
+
+            # If device already known → login normally
             session["logged_in"] = True
             session["user_email"] = entered_email
+            register_device(entered_email, device_id)
             log_action(f"Login successful for {entered_email}", ip)
             flash("Access granted", "success")
             return redirect("/home")
@@ -305,12 +381,21 @@ def verify_otp():
                 session.pop("otp_code")
                 flash("OTP expired. Request a new one.", "danger")
                 return redirect("/forgot")
-            session.pop("otp_code")
-            session.pop("otp_attempts")
-            session.pop("otp_expires")
-            session["reset_allowed"] = True
-            flash("OTP verified. Set new credential.", "success")
-            return redirect("/reset_credential")
+
+            # OTP correct → register new device
+            register_device(session["new_device_email"], session["pending_device_id"])
+
+            # Clear session keys for new device
+            session.pop("new_device_email", None)
+            session.pop("pending_device_id", None)
+            session.pop("otp_code", None)
+            session.pop("otp_attempts", None)
+            session.pop("otp_expires", None)
+
+            session["logged_in"] = True
+            session["user_email"] = cred["email"]
+            flash("OTP verified. Device registered. Logged in.", "success")
+            return redirect("/home")
         else:
             flash("Invalid OTP. Try again.", "warning")
 
@@ -385,6 +470,54 @@ def reset_system():
 def logout():
     session.clear()
     flash("System locked", "info")
+    return redirect("/login")
+
+
+# --------------------- NEW DEVICE ALERT ROUTE ---------------------
+@app.route("/device_alert/<token>")
+def device_alert(token):
+    """Handle 'Not You' link clicked from new device email"""
+    email = session.get("new_device_email")
+    session_token = session.get("new_device_token")
+    device_id = session.get("pending_device_id")
+
+    if not email or not session_token or not device_id:
+        flash("Invalid or expired device alert.", "warning")
+        return redirect("/login")
+
+    if token != session_token:
+        flash("Invalid token.", "danger")
+        return redirect("/login")
+
+    # Block user and require password reset
+    block_user(email)
+
+    # Clear session info related to new device
+    session.pop("new_device_email", None)
+    session.pop("new_device_token", None)
+    session.pop("pending_device_id", None)
+
+    flash("Your account has been blocked due to suspicious login. Please reset your credential via email link.", "danger")
+    return redirect("/login")
+# --------------------- END NEW DEVICE ALERT ---------------------
+
+@app.route("/not_you", methods=["POST"])
+def not_you_action():
+    action = request.form.get("action")
+    email = session.get("new_device_email")
+    device_id = session.get("pending_device_id")
+
+    if action == "block" and email:
+        block_user(email)
+        flash("Your account has been blocked due to suspicious login.", "danger")
+    elif action == "reset" and email:
+        flash("Please reset your credential via the email sent to you.", "info")
+        # optionally redirect to /forgot or /reset_credential
+    # Clear session info
+    session.pop("new_device_email", None)
+    session.pop("pending_device_id", None)
+    session.pop("new_device_token", None)
+
     return redirect("/login")
 
 
