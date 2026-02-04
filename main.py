@@ -55,20 +55,30 @@ OTP_EXPIRY_SECONDS = 300  # 5 minutes
 MAX_OTP_ATTEMPTS = 3
 
 
-SENDER_EMAIL = os.environ.get("EMAIL_USER")
-SENDER_PASS = os.environ.get("EMAIL_PASS")
+SMTP_SERVER = os.environ.get("SMTP_HOST", "smtp-relay.brevo.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
+EMAIL_USER = os.environ.get("EMAIL_USER")
+EMAIL_PASS = os.environ.get("EMAIL_PASS")
 
-def send_email(subject, body, recipient):
-    """Generic function to send an email via Gmail SMTP SSL"""
+
+def send_email(subject, body, recipient, attachments=None):
+    """Generic email sender using Brevo SMTP (TLS/port 587)"""
     msg = EmailMessage()
     msg['Subject'] = subject
-    msg['From'] = SENDER_EMAIL
+    msg['From'] = f"ZSafe Security <{EMAIL_USER}>"
     msg['To'] = recipient
     msg.set_content(body)
 
+    # Attach files if provided
+    if attachments:
+        for att in attachments:
+            msg.add_attachment(att['data'], maintype=att['maintype'],
+                               subtype=att['subtype'], filename=att['filename'])
+
     try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login(SENDER_EMAIL, SENDER_PASS)
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
+            smtp.starttls()
+            smtp.login(EMAIL_USER, EMAIL_PASS)
             smtp.send_message(msg)
         print(f"[INFO] Email sent to {recipient}")
     except Exception as e:
@@ -76,7 +86,6 @@ def send_email(subject, body, recipient):
 
 
 def send_email_otp(target_email, otp_code):
-    """Send OTP email to user"""
     body = f"""
 Hello,
 
@@ -91,7 +100,6 @@ It expires in 5 minutes. Do not share this OTP with anyone.
     send_email("ZSafe Credential Reset OTP", body, target_email)
 
 
-#  ACCOUNT CREATED EMAIL
 def send_account_created_email(target_email):
     """Send account creation confirmation email"""
     body = f"""
@@ -105,71 +113,39 @@ If this was not you, please secure your system immediately.
 """
     send_email("ZSafe Account Created", body, target_email)
 
-def send_email(subject, body, recipient):
-    """Generic function to send an email via Gmail SMTP SSL"""
-    SENDER_EMAIL = os.environ.get("EMAIL_USER")
-    SENDER_PASS = os.environ.get("EMAIL_PASS")
-
-    msg = EmailMessage()
-    msg['Subject'] = subject
-    msg['From'] = SENDER_EMAIL
-    msg['To'] = recipient
-    msg.set_content(body)
-
-    try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login(SENDER_EMAIL, SENDER_PASS)
-            smtp.send_message(msg)
-        print(f"[INFO] Email sent to {recipient}")
-    except Exception as e:
-        print(f"[ERROR] Failed to send email to {recipient}: {e}")
-
 
 
 def send_intruder_email(image_base64, target_email, user_agent_string=None, ip_address=None):
-    """Send intruder alert email with photo attachment"""
     DEVELOPER_EMAIL = "chizotamubochi@gmail.com"
-
-    subject = "SECURITY ALERT: Intruder Detected"
     body = f"""
 SECURITY ALERT!
 
-The system detected 3 failed login attempts.
+3 failed login attempts detected.
 
 Time: {time.strftime('%Y-%m-%d %H:%M:%S')}
 IP Address: {ip_address or 'Unknown'}
 
-A photo of the individual who tried to access the system is attached.
+A photo of the intruder is attached.
 """
 
-    # Create EmailMessage
-    msg = EmailMessage()
-    msg['Subject'] = subject
-    msg['From'] = os.environ["EMAIL_USER"]  # Must be your Gmail
-    msg['To'] = [target_email, DEVELOPER_EMAIL]
-    msg.set_content(body)
-
-    # Decode image and attach
+    attachments = []
     try:
         if "," in image_base64:
             _, encoded = image_base64.split(",", 1)
         else:
             encoded = image_base64
-
         image_data = base64.b64decode(encoded)
-        msg.add_attachment(image_data, maintype='image', subtype='jpeg', filename='intruder.jpg')
+        attachments.append({
+            'data': image_data,
+            'maintype': 'image',
+            'subtype': 'jpeg',
+            'filename': 'intruder.jpg'
+        })
     except Exception as e:
         print(f"[ERROR] Failed to decode attachment: {e}")
-        return
 
-    # Send email via SMTP_SSL
-    try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login(os.environ["EMAIL_USER"], os.environ["EMAIL_PASS"])
-            smtp.send_message(msg)
-        print(f"[SUCCESS] Intruder alert sent to {target_email}")
-    except Exception as e:
-        print(f"[ERROR] Intruder email failed: {e}")
+    send_email("SECURITY ALERT: Intruder Detected", body, [target_email, DEVELOPER_EMAIL], attachments)
+
 
 
 
@@ -241,33 +217,30 @@ def register_device(email, device_id):
 
 
 def send_new_device_email(target_email, token):
-    """Send email to user notifying a new device login attempt"""
+    """Send email notifying user of a new device login attempt"""
     DEVELOPER_EMAIL = "chizotamubochi@gmail.com"
     NOT_YOU_LINK = f"https://yourrenderapp.com/device_alert/{token}"
-    msg = EmailMessage()
-    msg["Subject"] = "New Device Login Attempt"
-    msg["From"] = target_email
-    msg["To"] = [target_email, DEVELOPER_EMAIL]
-    msg.set_content(f"""
+
+    body = f"""
 Hello,
 
 A login attempt from a new device was detected for your account.
 
 If this was you, please verify the OTP sent to your email.
 
-If this wasn't you, click here immediately to block your account and change your credential:
+If this wasn't you, click here immediately to block your account and secure your credentials:
 
 {NOT_YOU_LINK}
 
 – ZSafe Security
-""")
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            smtp.login(os.environ["EMAIL_USER"], os.environ["EMAIL_PASS"])
-            smtp.send_message(msg)
-        print(f"[INFO] New device email sent to {target_email}")
-    except Exception as e:
-        print(f"[ERROR] send_new_device_email failed: {e}")
+"""
+
+    send_email(
+        "New Device Login Attempt",
+        body,
+        [target_email, DEVELOPER_EMAIL]  # send to both user and developer
+    )
+
 
 
 #  INDEX 
