@@ -21,6 +21,18 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY")
 bcrypt.init_app(app)
 app.permanent_session_lifetime = timedelta(minutes=5)
 
+from flask import make_response
+
+def get_or_create_device_id():
+    device_id = request.cookies.get("device_id")
+    if not device_id:
+        # Generate new device ID (pseudo-random)
+        ua = request.user_agent.string
+        random_part = str(random.randint(100000, 999999))
+        device_id = hashlib.sha256(f"{ua}-{random_part}".encode()).hexdigest()
+    return device_id
+
+
 # ---------------- DB HELPER ----------------
 def query(sql, params=None, fetchone=False, fetchall=False, commit=False):
     db, cursor = get_db()
@@ -42,9 +54,6 @@ blocked_users = set()
 OTP_EXPIRY_SECONDS = 300  # 5 minutes
 MAX_OTP_ATTEMPTS = 3
 
-import smtplib
-from email.message import EmailMessage
-import os
 
 SENDER_EMAIL = os.environ.get("EMAIL_USER")
 SENDER_PASS = os.environ.get("EMAIL_PASS")
@@ -341,8 +350,6 @@ def setup():
 
 
 
-
-
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
@@ -350,7 +357,7 @@ def login():
         entered_cred = request.form.get("credential", "")
         ip = request.remote_addr
 
-        # --- Step 1: Check email format ---
+        # --- Step 1: Validate email format ---
         if not re.match(r"[^@]+@[^@]+\.[^@]+", entered_email):
             flash("Invalid email format", "warning")
             return redirect("/login")
@@ -368,7 +375,7 @@ def login():
                 flash("Email not registered", "warning")
                 return redirect("/login")
 
-            # --- Step 3: Check if blocked ---
+            # --- Step 3: Check if user is blocked ---
             if entered_email in blocked_users:
                 unblock_time = datetime.now() + timedelta(seconds=400)
                 cursor.close()
@@ -384,9 +391,17 @@ def login():
             if check_hash(entered_cred, cred["value_hash"]):
                 failed_attempts[entered_email] = 0
 
-                # -------- NEW DEVICE DETECTION + OTP --------
-                device_id = generate_device_id()
+                # -------- DEVICE DETECTION WITH COOKIE --------
+                device_id = request.cookies.get("device_id")
+                if not device_id:
+                    ua = request.user_agent.string
+                    random_part = str(random.randint(100000, 999999))
+                    device_id = hashlib.sha256(f"{ua}-{random_part}".encode()).hexdigest()
+
+                response = make_response()
+
                 if not is_known_device(entered_email, device_id):
+                    # New device detected → send OTP and alert email
                     otp_code = str(random.randint(100000, 999999))
                     session["otp_code"] = otp_code
                     session["otp_attempts"] = 0
@@ -399,20 +414,31 @@ def login():
                     session["new_device_token"] = token
                     threading.Thread(target=send_new_device_email, args=(entered_email, token), daemon=True).start()
 
-                    cursor.close()
-                    db.close()
                     flash("New device detected. Verify OTP sent to your email.", "info")
-                    return redirect("/verify_otp")
+                    response = redirect("/verify_otp")
 
-                # Device known → login normally
-                session["logged_in"] = True
-                session["user_email"] = entered_email
-                register_device(entered_email, device_id)
-                log_action(f"Login successful for {entered_email}", ip)
+                else:
+                    # Known device → normal login
+                    session["logged_in"] = True
+                    session["user_email"] = entered_email
+                    register_device(entered_email, device_id)
+                    log_action(f"Login successful for {entered_email}", ip)
+                    flash("Access granted", "success")
+                    response = redirect("/home")
+
+                # Set/refresh device cookie for 1 year
+                response.set_cookie(
+                    "device_id",
+                    device_id,
+                    max_age=60*60*24*365,  # 1 year
+                    secure=True,            # HTTPS only
+                    httponly=True,          # JS cannot access
+                    samesite="Lax"
+                )
+
                 cursor.close()
                 db.close()
-                flash("Access granted", "success")
-                return redirect("/home")
+                return response
 
             # --- Step 5: Wrong password/PIN ---
             failed_attempts[entered_email] = failed_attempts.get(entered_email, 0) + 1
@@ -448,6 +474,7 @@ def login():
             return redirect("/login")
 
     return render_template("app.html", page="login")
+
 
 
 
