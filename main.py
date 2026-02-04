@@ -463,6 +463,37 @@ def forgot():
         flash("An error occurred. Please try again.", "danger")
         return redirect("/login")
 
+#VERIFY OTP
+@app.route("/verify_otp", methods=["GET", "POST"])
+def verify_otp():
+    if request.method == "POST":
+        entered_otp = request.form.get("otp")
+        otp_code = session.get("otp_code")
+        otp_attempts = session.get("otp_attempts", 0)
+
+        if not otp_code:
+            flash("OTP expired. Try logging in again.", "warning")
+            return redirect("/login")
+
+        if entered_otp == otp_code:
+            session.pop("otp_code")
+            session.pop("otp_attempts")
+            session.pop("otp_expires")
+            # mark device as known
+            email = session.get("new_device_email")
+            device_id = session.get("pending_device_id")
+            if email and device_id:
+                register_device(email, device_id)
+                session["logged_in"] = True
+                session["user_email"] = email
+                flash("Device verified. Access granted.", "success")
+                return redirect("/home")
+        else:
+            session["otp_attempts"] = otp_attempts + 1
+            flash("Invalid OTP. Try again.", "danger")
+            return redirect("/verify_otp")
+
+    return render_template("app.html", page="verify_otp")
 
 
 
