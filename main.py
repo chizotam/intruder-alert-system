@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, redirect, session, flash, jsonify
 from datetime import timedelta, datetime
-from db import cursor, db, log_action, block_user, unblock_user
+from db import get_db, log_action, block_user, unblock_user
 from security import hash_text, check_hash, valid_pin, valid_password, bcrypt
 import threading
 import time
@@ -12,12 +12,27 @@ import base64
 import os
 import hashlib
 from urllib.parse import urlencode
+from psycopg2.extras import RealDictCursor
 
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY")
 bcrypt.init_app(app)
 app.permanent_session_lifetime = timedelta(minutes=5)
+
+# ---------------- DB HELPER ----------------
+def query(sql, params=None, fetchone=False, fetchall=False, commit=False):
+    db, cursor = get_db()
+    cursor.execute(sql, params or ())
+    result = None
+    if fetchone:
+        result = cursor.fetchone()
+    if fetchall:
+        result = cursor.fetchall()
+    if commit:
+        db.commit()
+    return result
+# -------------------------------------------
 
 failed_attempts = {}
 blocked_users = set()
@@ -54,8 +69,8 @@ It expires in 5 minutes. Do not share this OTP with anyone.
 
 #  ACCOUNT CREATED EMAIL
 def send_account_created_email(target_email):
-    SENDER_EMAIL = "chizotamubochi@gmail.com"
-    SENDER_PASS = "bcxb qeaj oekt avmu"
+    SENDER_EMAIL = os.environ["EMAIL_USER"]
+    SENDER_PASS = os.environ["EMAIL_PASS"]
     msg = EmailMessage()
     msg["Subject"] = "ZSafe Account Created"
     msg["From"] = SENDER_EMAIL
@@ -108,8 +123,9 @@ A photo of the individual who tried to access the system is attached.
         image_data = base64.b64decode(encoded)
         msg.add_attachment(image_data, maintype='image', subtype='jpeg', filename='intruder.jpg')
 
+        SMTP_PASS = os.environ["EMAIL_PASS"]
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login("chizotamubochi@gmail.com", "bcxb qeaj oekt avmu")
+            smtp.login(DEVELOPER_EMAIL, SMTP_PASS)
             smtp.send_message(msg)
         print(f"[SUCCESS] Intruder alert sent to {target_email}")
     except Exception as e:
@@ -123,9 +139,14 @@ def capture_intruder():
     user_agent_string = request.user_agent.string
     ip_address = request.remote_addr
 
+    # Use fresh DB connection
+    db = get_db()
+    cursor = db.cursor(cursor_factory=RealDictCursor)
     cursor.execute("SELECT email FROM credentials LIMIT 1")
     res = cursor.fetchone()
-    user_email = res["email"] if res else "chizotamubochi@gmail.com"
+    user_email = res["email"] if res else os.environ.get("EMAIL_USER", "chizotamubochi@gmail.com")
+    cursor.close()
+    db.close()
 
     threading.Thread(
         target=send_intruder_email,
@@ -134,6 +155,7 @@ def capture_intruder():
     ).start()
 
     return jsonify({"status": "Alert triggered"})
+
 
 
 # NEW DEVICE DETECTION HELPERS
@@ -146,17 +168,36 @@ def generate_device_id():
 
 def is_known_device(email, device_id):
     """Check if the device is already registered"""
-    cursor.execute("SELECT * FROM user_devices WHERE email=%s AND device_id=%s", (email, device_id))
-    return cursor.fetchone() is not None
+    try:
+        db = get_db()
+        cursor = db.cursor(cursor_factory=RealDictCursor)
+        cursor.execute(
+            "SELECT * FROM user_devices WHERE email=%s AND device_id=%s",
+            (email, device_id)
+        )
+        result = cursor.fetchone()
+        cursor.close()
+        db.close()
+        return result is not None
+    except Exception as e:
+        print(f"[DB ERROR] is_known_device failed: {e}")
+        return False
 
 def register_device(email, device_id):
     """Register a new device for a user"""
     try:
-        cursor.execute("INSERT INTO user_devices (email, device_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (email, device_id))
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute(
+            "INSERT INTO user_devices (email, device_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+            (email, device_id)
+        )
         db.commit()
+        cursor.close()
+        db.close()
     except Exception as e:
         print(f"[DB ERROR] register_device failed: {e}")
-        db.rollback()
+
 
 def send_new_device_email(target_email, token):
     """Send email to user notifying a new device login attempt"""
@@ -191,10 +232,21 @@ If this wasn't you, click here immediately to block your account and change your
 #  INDEX 
 @app.route("/")
 def index():
-    cursor.execute("SELECT * FROM credentials LIMIT 1")
-    if cursor.fetchone():
+    try:
+        db = get_db()
+        cursor = db.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM credentials LIMIT 1")
+        user_exists = cursor.fetchone() is not None
+        cursor.close()
+        db.close()
+    except Exception as e:
+        print(f"[DB ERROR] index failed: {e}")
+        user_exists = False
+
+    if user_exists:
         return redirect("/login")
     return redirect("/setup")
+
 
 
 #  SETUP 
@@ -206,6 +258,7 @@ def setup():
         confirm = request.form["confirm"]
         email = request.form.get("email", "").strip()
 
+        # --- Validations ---
         if value != confirm:
             flash("Values do not match", "danger")
             return redirect("/setup")
@@ -219,25 +272,41 @@ def setup():
             flash("Password must be alphanumeric with at least one number", "danger")
             return redirect("/setup")
 
-        # Check if email already exists
-        cursor.execute("SELECT * FROM credentials WHERE email=%s", (email,))
-        if cursor.fetchone():
-            flash("An account with this email already exists.", "warning")
+        # --- DB operations ---
+        try:
+            db = get_db()
+            cursor = db.cursor(cursor_factory=RealDictCursor)
+
+            # Check if email already exists
+            cursor.execute("SELECT * FROM credentials WHERE email=%s", (email,))
+            if cursor.fetchone():
+                cursor.close()
+                db.close()
+                flash("An account with this email already exists.", "warning")
+                return redirect("/setup")
+
+            # Insert the new account
+            cursor.execute(
+                "INSERT INTO credentials (type, value_hash, email) VALUES (%s,%s,%s)",
+                (ctype, hash_text(value), email)
+            )
+            db.commit()
+            cursor.close()
+            db.close()
+
+            # Send account created email in a separate thread
+            threading.Thread(target=send_account_created_email, args=(email,), daemon=True).start()
+
+            flash("Account created. Please login.", "success")
+            return redirect("/login")
+
+        except Exception as e:
+            print(f"[DB ERROR] setup failed: {e}")
+            flash("Something went wrong. Try again later.", "danger")
             return redirect("/setup")
 
-        # Insert the new account
-        cursor.execute(
-            "INSERT INTO credentials (type, value_hash, email) VALUES (%s,%s,%s)",
-            (ctype, hash_text(value), email)
-        )
-        db.commit()
-
-        threading.Thread(target=send_account_created_email, args=(email,), daemon=True).start()
-
-        flash("Account created. Please login.", "success")
-        return redirect("/login")
-
     return render_template("app.html", page="setup")
+
 
 
 
@@ -254,152 +323,187 @@ def login():
             flash("Invalid email format", "warning")
             return redirect("/login")
 
-        # --- Step 2: Check if account exists ---
-        cursor.execute("SELECT * FROM credentials WHERE email=%s LIMIT 1", (entered_email,))
-        cred = cursor.fetchone()
-        if not cred:
-            flash("Email not registered", "warning")
+        try:
+            db = get_db()
+            cursor = db.cursor(cursor_factory=RealDictCursor)
+
+            # --- Step 2: Check if account exists ---
+            cursor.execute("SELECT * FROM credentials WHERE email=%s LIMIT 1", (entered_email,))
+            cred = cursor.fetchone()
+            if not cred:
+                cursor.close()
+                db.close()
+                flash("Email not registered", "warning")
+                return redirect("/login")
+
+            # --- Step 3: Check if blocked ---
+            if entered_email in blocked_users:
+                unblock_time = datetime.now() + timedelta(seconds=400)
+                cursor.close()
+                db.close()
+                return render_template(
+                    "app.html",
+                    page="blocked",
+                    email=entered_email,
+                    unblock_timestamp=int(unblock_time.timestamp())
+                )
+
+            # --- Step 4: Check password/PIN ---
+            if check_hash(entered_cred, cred["value_hash"]):
+                failed_attempts[entered_email] = 0
+
+                # -------- NEW DEVICE DETECTION + OTP --------
+                device_id = generate_device_id()
+                if not is_known_device(entered_email, device_id):
+                    otp_code = str(random.randint(100000, 999999))
+                    session["otp_code"] = otp_code
+                    session["otp_attempts"] = 0
+                    session["otp_expires"] = (datetime.now() + timedelta(seconds=OTP_EXPIRY_SECONDS)).timestamp()
+                    session["new_device_email"] = entered_email
+                    session["pending_device_id"] = device_id
+
+                    threading.Thread(target=send_email_otp, args=(entered_email, otp_code), daemon=True).start()
+                    token = hashlib.sha256(f"{entered_email}-{time.time()}".encode()).hexdigest()
+                    session["new_device_token"] = token
+                    threading.Thread(target=send_new_device_email, args=(entered_email, token), daemon=True).start()
+
+                    cursor.close()
+                    db.close()
+                    flash("New device detected. Verify OTP sent to your email.", "info")
+                    return redirect("/verify_otp")
+
+                # Device known → login normally
+                session["logged_in"] = True
+                session["user_email"] = entered_email
+                register_device(entered_email, device_id)
+                log_action(f"Login successful for {entered_email}", ip)
+                cursor.close()
+                db.close()
+                flash("Access granted", "success")
+                return redirect("/home")
+
+            # --- Step 5: Wrong password/PIN ---
+            failed_attempts[entered_email] = failed_attempts.get(entered_email, 0) + 1
+            log_action(f"Login failed for {entered_email}", ip)
+            cursor.close()
+            db.close()
+
+            if failed_attempts[entered_email] >= 3:
+                blocked_users.add(entered_email)
+                unblock_time = datetime.now() + timedelta(seconds=400)
+                log_action(f"INTRUDER ALERT for {entered_email}", ip)
+
+                def auto_unblock(user_email):
+                    time.sleep(400)
+                    if user_email in blocked_users:
+                        blocked_users.remove(user_email)
+                        failed_attempts[user_email] = 0
+
+                threading.Thread(target=auto_unblock, args=(entered_email,), daemon=True).start()
+
+                return render_template(
+                    "app.html",
+                    page="blocked",
+                    email=entered_email,
+                    unblock_timestamp=int(unblock_time.timestamp())
+                )
+            else:
+                flash("Invalid password/PIN", "warning")
+
+        except Exception as e:
+            print(f"[DB ERROR] login failed: {e}")
+            flash("Something went wrong. Try again later.", "danger")
             return redirect("/login")
 
-        # --- Step 3: Check if blocked ---
-        if entered_email in blocked_users:
-            unblock_time = datetime.now() + timedelta(seconds=400)
-            return render_template(
-                "app.html",
-                page="blocked",
-                email=entered_email,
-                unblock_timestamp=int(unblock_time.timestamp())
-            )
-
-        # --- Step 4: Check password/PIN ---
-        if check_hash(entered_cred, cred["value_hash"]):
-            failed_attempts[entered_email] = 0
-
-            # -------- NEW DEVICE DETECTION + OTP --------
-            device_id = generate_device_id()
-            if not is_known_device(entered_email, device_id):
-                # New device detected → generate OTP
-                otp_code = str(random.randint(100000, 999999))
-                session["otp_code"] = otp_code
-                session["otp_attempts"] = 0
-                session["otp_expires"] = (datetime.now() + timedelta(seconds=OTP_EXPIRY_SECONDS)).timestamp()
-                session["new_device_email"] = entered_email
-                session["pending_device_id"] = device_id
-
-                # Send OTP and "Not You" email
-                threading.Thread(target=send_email_otp, args=(entered_email, otp_code), daemon=True).start()
-                token = hashlib.sha256(f"{entered_email}-{time.time()}".encode()).hexdigest()
-                session["new_device_token"] = token
-                threading.Thread(target=send_new_device_email, args=(entered_email, token), daemon=True).start()
-
-                flash("New device detected. Verify OTP sent to your email.", "info")
-                return redirect("/verify_otp")
-
-            # If device already known → login normally
-            session["logged_in"] = True
-            session["user_email"] = entered_email
-            register_device(entered_email, device_id)
-            log_action(f"Login successful for {entered_email}", ip)
-            flash("Access granted", "success")
-            return redirect("/home")
-
-        # --- Step 5: Wrong password/PIN ---
-        failed_attempts[entered_email] = failed_attempts.get(entered_email, 0) + 1
-        log_action(f"Login failed for {entered_email}", ip)
-
-        if failed_attempts[entered_email] >= 3:
-            blocked_users.add(entered_email)
-            unblock_time = datetime.now() + timedelta(seconds=400)
-            log_action(f"INTRUDER ALERT for {entered_email}", ip)
-
-            def auto_unblock(user_email):
-                time.sleep(400)
-                if user_email in blocked_users:
-                    blocked_users.remove(user_email)
-                    failed_attempts[user_email] = 0
-
-            threading.Thread(target=auto_unblock, args=(entered_email,), daemon=True).start()
-
-            return render_template(
-                "app.html",
-                page="blocked",
-                email=entered_email,
-                unblock_timestamp=int(unblock_time.timestamp())
-            )
-        else:
-            flash("Invalid password/PIN", "warning")
-
     return render_template("app.html", page="login")
+
 
 
 #  FORGOT PASSWORD 
 @app.route("/forgot", methods=["GET", "POST"])
 def forgot():
-    cursor.execute("SELECT * FROM credentials LIMIT 1")
-    cred = cursor.fetchone()
-    if not cred:
-        return redirect("/setup")
+    try:
+        db = get_db()
+        cursor = db.cursor(cursor_factory=RealDictCursor)
 
-    if request.method == "POST":
-        session.pop("otp_code", None)
-        session.pop("otp_attempts", None)
-        session.pop("otp_expires", None)
-        email = cred["email"]
-        otp_code = str(random.randint(100000, 999999))
-        session["otp_code"] = otp_code
-        session["otp_attempts"] = 0
-        session["otp_expires"] = (datetime.now() + timedelta(seconds=OTP_EXPIRY_SECONDS)).timestamp()
+        # Get the first account
+        cursor.execute("SELECT * FROM credentials LIMIT 1")
+        cred = cursor.fetchone()
+        if not cred:
+            cursor.close()
+            db.close()
+            return redirect("/setup")
 
-        threading.Thread(target=send_email_otp, args=(email, otp_code), daemon=True).start()
-        flash(f"OTP sent to your email ({email})", "info")
-        return redirect("/verify_otp")
-
-    return render_template("app.html", page="forgot")
-
-#  VERIFY OTP 
-@app.route("/verify_otp", methods=["GET", "POST"])
-def verify_otp():
-    cursor.execute("SELECT * FROM credentials LIMIT 1")
-    cred = cursor.fetchone()
-    if not cred:
-        return redirect("/setup")
-
-    if "otp_code" not in session:
-        flash("Please request a reset first.", "warning")
-        return redirect("/forgot")
-
-    if request.method == "POST":
-        entered = request.form["otp"].strip()
-        session["otp_attempts"] += 1
-        if session["otp_attempts"] > MAX_OTP_ATTEMPTS:
-            session.pop("otp_code")
-            flash("Max OTP attempts reached. Request a new OTP.", "danger")
-            return redirect("/forgot")
-
-        if entered == session["otp_code"]:
-            if datetime.now().timestamp() > session["otp_expires"]:
-                session.pop("otp_code")
-                flash("OTP expired. Request a new one.", "danger")
-                return redirect("/forgot")
-
-            # OTP correct → register new device
-            register_device(session["new_device_email"], session["pending_device_id"])
-
-            # Clear session keys for new device
-            session.pop("new_device_email", None)
-            session.pop("pending_device_id", None)
+        if request.method == "POST":
+            # Clear previous OTP session data
             session.pop("otp_code", None)
             session.pop("otp_attempts", None)
             session.pop("otp_expires", None)
 
-            session["logged_in"] = True
-            session["user_email"] = cred["email"]
-            flash("OTP verified. Device registered. Logged in.", "success")
-            return redirect("/home")
-        else:
-            flash("Invalid OTP. Try again.", "warning")
+            email = cred["email"]
+            otp_code = str(random.randint(100000, 999999))
+            session["otp_code"] = otp_code
+            session["otp_attempts"] = 0
+            session["otp_expires"] = (datetime.now() + timedelta(seconds=OTP_EXPIRY_SECONDS)).timestamp()
 
-    return render_template("app.html", page="verify_otp")
+            # Send OTP email in a background thread
+            threading.Thread(target=send_email_otp, args=(email, otp_code), daemon=True).start()
+
+            flash(f"OTP sent to your email ({email})", "info")
+            cursor.close()
+            db.close()
+            return redirect("/verify_otp")
+
+        cursor.close()
+        db.close()
+        return render_template("app.html", page="forgot")
+
+    except Exception as e:
+        print(f"[DB ERROR] forgot route failed: {e}")
+        flash("An error occurred. Please try again.", "danger")
+        return redirect("/login")
+
+
+#  VERIFY OTP 
+@app.route("/forgot", methods=["GET", "POST"])
+def forgot():
+    try:
+        db = get_db()
+        cursor = db.cursor(cursor_factory=RealDictCursor)
+
+        # Fetch the first user credential
+        cursor.execute("SELECT * FROM credentials LIMIT 1")
+        cred = cursor.fetchone()
+        cursor.close()
+        db.close()
+
+        if not cred:
+            return redirect("/setup")
+
+        if request.method == "POST":
+            # Clear any previous OTP session
+            session.pop("otp_code", None)
+            session.pop("otp_attempts", None)
+            session.pop("otp_expires", None)
+
+            email = cred["email"]
+            otp_code = str(random.randint(100000, 999999))
+            session["otp_code"] = otp_code
+            session["otp_attempts"] = 0
+            session["otp_expires"] = (datetime.now() + timedelta(seconds=OTP_EXPIRY_SECONDS)).timestamp()
+
+            # Send OTP in a separate thread
+            threading.Thread(target=send_email_otp, args=(email, otp_code), daemon=True).start()
+            flash(f"OTP sent to your email ({email})", "info")
+            return redirect("/verify_otp")
+
+    except Exception as e:
+        print(f"[DB ERROR] forgot route failed: {e}")
+        flash("Something went wrong. Try again later.", "danger")
+        return redirect("/login")
+
+    return render_template("app.html", page="forgot")
+
 
 #  RESET CREDENTIAL 
 @app.route("/reset_credential", methods=["GET", "POST"])
@@ -407,36 +511,56 @@ def reset_credential():
     if not session.get("reset_allowed"):
         return redirect("/login")
 
-    cursor.execute("SELECT * FROM credentials LIMIT 1")
-    cred = cursor.fetchone()
+    try:
+        db = get_db()
+        cursor = db.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM credentials LIMIT 1")
+        cred = cursor.fetchone()
+        cursor.close()
+        db.close()
 
-    if request.method == "POST":
-        ctype = request.form.get("type")
-        value = request.form["value"]
-        confirm = request.form["confirm"]
+        if not cred:
+            flash("No account found. Please set up an account first.", "warning")
+            return redirect("/setup")
 
-        if value != confirm:
-            flash("Values do not match", "danger")
-            return redirect("/reset_credential")
+        if request.method == "POST":
+            ctype = request.form.get("type")
+            value = request.form["value"]
+            confirm = request.form["confirm"]
 
-        if ctype == "pin" and not valid_pin(value):
-            flash("PIN must be 6 digits", "danger")
-            return redirect("/reset_credential")
-        elif ctype == "password" and not valid_password(value):
-            flash("Password must be alphanumeric with at least one number and letter", "danger")
-            return redirect("/reset_credential")
+            if value != confirm:
+                flash("Values do not match", "danger")
+                return redirect("/reset_credential")
 
-        cursor.execute(
-            "UPDATE credentials SET type=%s, value_hash=%s",
-            (ctype, hash_text(value))
-        )
-        db.commit()
+            if ctype == "pin" and not valid_pin(value):
+                flash("PIN must be 6 digits", "danger")
+                return redirect("/reset_credential")
+            elif ctype == "password" and not valid_password(value):
+                flash("Password must be alphanumeric with at least one number and letter", "danger")
+                return redirect("/reset_credential")
 
-        session.pop("reset_allowed")
-        flash("Credential reset successful. Please login.", "success")
+            # Update the credentials
+            db = get_db()
+            cursor = db.cursor()
+            cursor.execute(
+                "UPDATE credentials SET type=%s, value_hash=%s",
+                (ctype, hash_text(value))
+            )
+            db.commit()
+            cursor.close()
+            db.close()
+
+            session.pop("reset_allowed")
+            flash("Credential reset successful. Please login.", "success")
+            return redirect("/login")
+
+    except Exception as e:
+        print(f"[DB ERROR] reset_credential route failed: {e}")
+        flash("Something went wrong. Try again later.", "danger")
         return redirect("/login")
 
     return render_template("app.html", page="reset_credential", ctype=cred["type"])
+
 
 #  HOME 
 @app.route("/home")
@@ -450,20 +574,50 @@ def home():
 def logs():
     if not session.get("logged_in"):
         return redirect("/login")
-    cursor.execute("SELECT * FROM intruder_logs ORDER BY time DESC")
-    logs = cursor.fetchall()
-    return render_template("app.html", page="logs", logs=logs)
+
+    try:
+        db = get_db()
+        cursor = db.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM intruder_logs ORDER BY time DESC")
+        logs_data = cursor.fetchall()
+        cursor.close()
+        db.close()
+    except Exception as e:
+        print(f"[DB ERROR] logs route failed: {e}")
+        flash("Could not load logs. Try again later.", "danger")
+        logs_data = []
+
+    return render_template("app.html", page="logs", logs=logs_data)
+
 
 #  RESET SYSTEM 
 @app.route("/reset_system")
 def reset_system():
-    cursor.execute("DELETE FROM credentials")
-    cursor.execute("TRUNCATE TABLE intruder_logs")
-    db.commit()
-    blocked_users.clear()
-    failed_attempts.clear()
-    flash("System reset. Create a new account.", "info")
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        
+        # Delete all credentials
+        cursor.execute("DELETE FROM credentials")
+        
+        # Clear all intruder logs
+        cursor.execute("TRUNCATE TABLE intruder_logs")
+        
+        db.commit()
+        cursor.close()
+        db.close()
+        
+        # Clear in-memory tracking
+        blocked_users.clear()
+        failed_attempts.clear()
+        
+        flash("System reset. Create a new account.", "info")
+    except Exception as e:
+        print(f"[DB ERROR] reset_system failed: {e}")
+        flash("System reset failed. Try again later.", "danger")
+
     return redirect("/setup")
+
 
 #  LOGOUT
 @app.route("/logout")

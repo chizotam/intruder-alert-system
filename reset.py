@@ -1,20 +1,30 @@
 # reset_system.py
-from db import cursor, db
+from db import get_db
 
 def reset_system():
-    # Delete all credentials
-    cursor.execute("DELETE FROM credentials")
+    try:
+        db = get_db()
+        cursor = db.cursor()
 
-    # Clear intruder logs (this also resets the SERIAL sequences)
-    cursor.execute("TRUNCATE TABLE intruder_logs RESTART IDENTITY")
+        # Delete all credentials
+        cursor.execute("DELETE FROM credentials")
 
-    # Reset credentials sequence manually (PostgreSQL)
-    cursor.execute("ALTER SEQUENCE credentials_id_seq RESTART WITH 1")
+        # Clear intruder logs (this also resets the SERIAL sequences)
+        cursor.execute("TRUNCATE TABLE intruder_logs RESTART IDENTITY")
 
-    # Commit changes
-    db.commit()
+        # Reset credentials sequence manually (PostgreSQL)
+        cursor.execute("ALTER SEQUENCE credentials_id_seq RESTART WITH 1")
 
-    print("System reset complete. Database is now empty.")
+        # Commit changes
+        db.commit()
+        print("System reset complete. Database is now empty.")
+
+    except Exception as e:
+        print(f"[DB ERROR] reset_system failed: {e}")
+        db.rollback()
+    finally:
+        cursor.close()
+        db.close()
 
 if __name__ == "__main__":
     reset_system()

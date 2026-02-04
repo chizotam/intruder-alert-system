@@ -3,24 +3,23 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import bcrypt
 
-# PostgreSQL connection from Render environment
-try:
-    db = psycopg2.connect(
+
+def get_db():
+    return psycopg2.connect(
         host=os.environ["DB_HOST"],
         database=os.environ["DB_NAME"],
         user=os.environ["DB_USER"],
         password=os.environ["DB_PASS"],
-        port=os.environ.get("DB_PORT", "5432")
+        port=os.environ.get("DB_PORT", "5432"),
+        sslmode="require"
     )
-    cursor = db.cursor(cursor_factory=RealDictCursor)
-    print("Connected to PostgreSQL database.")
-except Exception as e:
-    print("Error connecting to PostgreSQL:", e)
-    exit()
 
 
 def init_tables():
     try:
+        db = get_db()
+        cursor = db.cursor(cursor_factory=RealDictCursor)
+
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS credentials (
             id SERIAL PRIMARY KEY,
@@ -54,55 +53,47 @@ def init_tables():
         """)
 
         db.commit()
+        cursor.close()
+        db.close()
+
     except Exception as e:
         print(f"[DB ERROR] init_tables failed: {e}")
-        db.rollback()
 
 
-#  LOG ACTIONS 
+# LOG ACTIONS
 def log_action(action, ip, email=None):
-    """
-    Logs any action (login failed, intruder alert, login successful)
-    """
     try:
+        db = get_db()
+        cursor = db.cursor(cursor_factory=RealDictCursor)
+
         cursor.execute(
             "INSERT INTO intruder_logs (action, ip, email) VALUES (%s, %s, %s)",
             (action, ip, email)
         )
+
         db.commit()
+        cursor.close()
+        db.close()
+
     except Exception as e:
         print(f"[DB ERROR] log_action failed: {e}")
-        db.rollback()
 
 
-#  PASSWORD / PIN HASHING 
+# PASSWORD / PIN HASHING
 def hash_text(text: str) -> str:
-    """
-    Returns a bcrypt hash of the given text
-    """
     return bcrypt.hashpw(text.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
 
 def check_hash(text: str, hashed: str) -> bool:
-    """
-    Checks if the given text matches the hashed value
-    """
     return bcrypt.checkpw(text.encode('utf-8'), hashed.encode('utf-8'))
 
 
-#  VALIDATION 
+# VALIDATION
 def valid_pin(pin: str) -> bool:
-    """
-    Checks if pin is exactly 6 digits
-    """
     return pin.isdigit() and len(pin) == 6
 
 
 def valid_password(password: str) -> bool:
-    """
-    Checks if password is at least 6 chars and contains
-    letters and numbers
-    """
     if len(password) < 6:
         return False
     has_letter = any(c.isalpha() for c in password)
@@ -110,30 +101,36 @@ def valid_password(password: str) -> bool:
     return has_letter and has_digit
 
 
-#  USER BLOCKING 
+# USER BLOCKING
 def block_user(email: str):
-    """
-    Marks a user as blocked
-    """
     try:
+        db = get_db()
+        cursor = db.cursor(cursor_factory=RealDictCursor)
+
         cursor.execute("UPDATE credentials SET blocked=TRUE WHERE email=%s", (email,))
         db.commit()
+
+        cursor.close()
+        db.close()
+
     except Exception as e:
         print(f"[DB ERROR] block_user failed: {e}")
-        db.rollback()
 
 
 def unblock_user(email: str):
-    """
-    Unblocks a user
-    """
     try:
+        db = get_db()
+        cursor = db.cursor(cursor_factory=RealDictCursor)
+
         cursor.execute("UPDATE credentials SET blocked=FALSE WHERE email=%s", (email,))
         db.commit()
+
+        cursor.close()
+        db.close()
+
     except Exception as e:
         print(f"[DB ERROR] unblock_user failed: {e}")
-        db.rollback()
 
 
-#  INIT 
+# INIT
 init_tables()
