@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Zsafe | Secure System</title>
     <style>
-        /* -------------------- ROOT COLORS -------------------- */
         :root {
             --bg-dark: #0d1117;
             --card-bg: #1a1f28; 
@@ -16,14 +16,16 @@
             --border: #30363d;
         }
 
+        html, body {
+            overflow-x: hidden;
+            margin: 0;
+            padding: 0;
+        }
+
         body {
             background-color: var(--bg-dark);
             font-family: 'Segoe UI', system-ui, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            margin: 0;
+            padding: 20px 10px;
         }
 
         .container {
@@ -32,10 +34,11 @@
             box-shadow: 0 10px 30px rgba(0,0,0,0.5);
             width: 100%;
             max-width: 400px;
-            padding: 40px;
+            padding: 20px;
             box-sizing: border-box;
             border-radius: 12px;
             color: #f5f5f5;
+            margin: 20px auto;
         }
 
         h1 { font-weight: 800; text-transform: uppercase; letter-spacing: -1px; color: var(--accent); text-align: center; margin-bottom: 0; }
@@ -115,7 +118,15 @@
         .blocked-info { color: #ddd; line-height: 1.6; }
         #intruder_cam, #intruder_canvas { display: none; }
 
-        @media (max-width: 480px) { .container { padding: 20px; } }
+        @media (max-width: 480px) {
+            .container {
+                padding: 15px;
+                margin: 15px auto;
+            }
+            h1 { font-size: 24px; }
+            h2 { font-size: 20px; }
+            input, select, button { padding: 10px; font-size: 14px; }
+        }
     </style>
 </head>
 <body>
@@ -331,26 +342,6 @@
                 }
             }
             captureIntruder();
-
-            const blockedTimerEl = document.getElementById('blocked_timer');
-            const unblockTimestamp = parseInt(blockedTimerEl.dataset.unblock, 10);
-
-            function updateBlockedTimer() {
-                const now = Math.floor(Date.now() / 1000);
-                let remaining = unblockTimestamp - now;
-                if(remaining <= 0){
-                    blockedTimerEl.innerText = "You are now unblocked. Redirecting...";
-                    clearInterval(blockedInterval);
-                    setTimeout(() => { window.location.href = "/login"; }, 2000);
-                } else {
-                    const minutes = Math.floor(remaining / 60).toString().padStart(2,'0');
-                    const seconds = (remaining % 60).toString().padStart(2,'0');
-                    blockedTimerEl.innerText = `${minutes}:${seconds}`;
-                }
-            }
-
-            const blockedInterval = setInterval(updateBlockedTimer, 1000);
-            updateBlockedTimer();
         </script>
     {% endif %}
 
