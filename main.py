@@ -464,45 +464,6 @@ def forgot():
         return redirect("/login")
 
 
-#  VERIFY OTP 
-@app.route("/forgot", methods=["GET", "POST"])
-def forgot():
-    try:
-        db = get_db()
-        cursor = db.cursor(cursor_factory=RealDictCursor)
-
-        # Fetch the first user credential
-        cursor.execute("SELECT * FROM credentials LIMIT 1")
-        cred = cursor.fetchone()
-        cursor.close()
-        db.close()
-
-        if not cred:
-            return redirect("/setup")
-
-        if request.method == "POST":
-            # Clear any previous OTP session
-            session.pop("otp_code", None)
-            session.pop("otp_attempts", None)
-            session.pop("otp_expires", None)
-
-            email = cred["email"]
-            otp_code = str(random.randint(100000, 999999))
-            session["otp_code"] = otp_code
-            session["otp_attempts"] = 0
-            session["otp_expires"] = (datetime.now() + timedelta(seconds=OTP_EXPIRY_SECONDS)).timestamp()
-
-            # Send OTP in a separate thread
-            threading.Thread(target=send_email_otp, args=(email, otp_code), daemon=True).start()
-            flash(f"OTP sent to your email ({email})", "info")
-            return redirect("/verify_otp")
-
-    except Exception as e:
-        print(f"[DB ERROR] forgot route failed: {e}")
-        flash("Something went wrong. Try again later.", "danger")
-        return redirect("/login")
-
-    return render_template("app.html", page="forgot")
 
 
 #  RESET CREDENTIAL 
