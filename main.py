@@ -13,6 +13,7 @@ import os
 import hashlib
 from urllib.parse import urlencode
 from psycopg2.extras import RealDictCursor
+import requests
 
 
 
@@ -55,34 +56,46 @@ OTP_EXPIRY_SECONDS = 300  # 5 minutes
 MAX_OTP_ATTEMPTS = 3
 
 
-SMTP_SERVER = os.environ.get("SMTP_HOST", "smtp-relay.brevo.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
-EMAIL_USER = os.environ.get("EMAIL_USER")
-EMAIL_PASS = os.environ.get("EMAIL_PASS")
+BREVO_API_KEY = os.environ.get("EMAIL_PASS")  # your Brevo API key
+FROM_EMAIL = "a17f7b001@smtp-brevo.com"      # the verified sender email
+FROM_NAME = "ZTECH"
 
+def send_email(subject, body, to_emails, attachments=None):
+    """Send email via Brevo API"""
+    if isinstance(to_emails, str):
+        to_emails = [to_emails]
 
-def send_email(subject, body, recipient, attachments=None):
-    """Generic email sender using Brevo SMTP (TLS/port 587)"""
-    msg = EmailMessage()
-    msg['Subject'] = subject
-    msg['From'] = f"ZSafe Security <{EMAIL_USER}>"
-    msg['To'] = recipient
-    msg.set_content(body)
+    url = "https://api.brevo.com/v3/smtp/email"
+    headers = {
+        "accept": "application/json",
+        "api-key": BREVO_API_KEY,
+        "content-type": "application/json"
+    }
 
-    # Attach files if provided
+    payload = {
+        "sender": {"name": FROM_NAME, "email": FROM_EMAIL},
+        "to": [{"email": e} for e in to_emails],
+        "subject": subject,
+        "textContent": body
+    }
+
+    # Add attachments if present
     if attachments:
+        payload["attachment"] = []
         for att in attachments:
-            msg.add_attachment(att['data'], maintype=att['maintype'],
-                               subtype=att['subtype'], filename=att['filename'])
+            payload["attachment"].append({
+                "content": base64.b64encode(att['data']).decode(),
+                "name": att['filename']
+            })
 
     try:
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
-            smtp.starttls()
-            smtp.login(EMAIL_USER, EMAIL_PASS)
-            smtp.send_message(msg)
-        print(f"[INFO] Email sent to {recipient}")
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        if response.status_code in (200, 201, 202):
+            print(f"[INFO] Email sent to {to_emails}")
+        else:
+            print(f"[ERROR] Failed to send email: {response.status_code} {response.text}")
     except Exception as e:
-        print(f"[ERROR] Failed to send email to {recipient}: {e}")
+        print(f"[ERROR] Exception while sending email: {e}")
 
 
 def send_email_otp(target_email, otp_code):
@@ -99,9 +112,7 @@ It expires in 5 minutes. Do not share this OTP with anyone.
 """
     send_email("ZSafe Credential Reset OTP", body, target_email)
 
-
 def send_account_created_email(target_email):
-    """Send account creation confirmation email"""
     body = f"""
 Hello,
 
@@ -112,6 +123,7 @@ If this was not you, please secure your system immediately.
 – ZSafe Security
 """
     send_email("ZSafe Account Created", body, target_email)
+
 
 
 
@@ -137,8 +149,6 @@ A photo of the intruder is attached.
         image_data = base64.b64decode(encoded)
         attachments.append({
             'data': image_data,
-            'maintype': 'image',
-            'subtype': 'jpeg',
             'filename': 'intruder.jpg'
         })
     except Exception as e:
@@ -215,12 +225,9 @@ def register_device(email, device_id):
     except Exception as e:
         print(f"[DB ERROR] register_device failed: {e}")
 
-
 def send_new_device_email(target_email, token):
-    """Send email notifying user of a new device login attempt"""
     DEVELOPER_EMAIL = "chizotamubochi@gmail.com"
     NOT_YOU_LINK = f"https://yourrenderapp.com/device_alert/{token}"
-
     body = f"""
 Hello,
 
@@ -228,19 +235,13 @@ A login attempt from a new device was detected for your account.
 
 If this was you, please verify the OTP sent to your email.
 
-If this wasn't you, click here immediately to block your account and secure your credentials:
+If this wasn't you, click here immediately to block your account and change your credential:
 
 {NOT_YOU_LINK}
 
 – ZSafe Security
 """
-
-    send_email(
-        "New Device Login Attempt",
-        body,
-        [target_email, DEVELOPER_EMAIL]  # send to both user and developer
-    )
-
+    send_email("New Device Login Attempt", body, [target_email, DEVELOPER_EMAIL])
 
 
 #  INDEX 
