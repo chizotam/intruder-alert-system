@@ -56,47 +56,56 @@ OTP_EXPIRY_SECONDS = 300  # 5 minutes
 MAX_OTP_ATTEMPTS = 3
 
 
-BREVO_API_KEY = os.environ.get("EMAIL_PASS")  # your Brevo API key
-FROM_EMAIL = "a17f7b001@smtp-brevo.com"      # the verified sender email
-FROM_NAME = "ZTECH"
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY")
+SENDER_EMAIL = os.environ.get("BREVO_SENDER_EMAIL")  # the email you verified in Brevo
+SENDER_NAME = "ZSafe Security"
+DEVELOPER_EMAIL = "chizotamubochi@gmail.com"
 
-def send_email(subject, body, to_emails, attachments=None):
-    """Send email via Brevo API"""
-    if isinstance(to_emails, str):
-        to_emails = [to_emails]
+def send_email_via_brevo(subject, body, recipients, attachments=None):
+    """
+    Send email via Brevo Transactional API.
+    recipients: string or list of strings
+    attachments: list of dicts {"filename": "file.jpg", "content": base64_string, "type": "image/jpeg"}
+    """
+    if isinstance(recipients, str):
+        recipients = [recipients]
 
-    url = "https://api.brevo.com/v3/smtp/email"
+    payload = {
+        "sender": {"name": SENDER_NAME, "email": SENDER_EMAIL},
+        "to": [{"email": r} for r in recipients],
+        "subject": subject,
+        "htmlContent": body.replace("\n", "<br>")  # convert newlines to HTML <br>
+    }
+
+    if attachments:
+        payload["attachment"] = []
+        for att in attachments:
+            payload["attachment"].append({
+                "name": att["filename"],
+                "content": att["content"],  # must be base64
+                "type": att.get("type", "application/octet-stream")
+            })
+
     headers = {
         "accept": "application/json",
         "api-key": BREVO_API_KEY,
         "content-type": "application/json"
     }
 
-    payload = {
-        "sender": {"name": FROM_NAME, "email": FROM_EMAIL},
-        "to": [{"email": e} for e in to_emails],
-        "subject": subject,
-        "textContent": body
-    }
-
-    # Add attachments if present
-    if attachments:
-        payload["attachment"] = []
-        for att in attachments:
-            payload["attachment"].append({
-                "content": base64.b64encode(att['data']).decode(),
-                "name": att['filename']
-            })
-
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
-        if response.status_code in (200, 201, 202):
-            print(f"[INFO] Email sent to {to_emails}")
-        else:
-            print(f"[ERROR] Failed to send email: {response.status_code} {response.text}")
-    except Exception as e:
-        print(f"[ERROR] Exception while sending email: {e}")
+        response = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            json=payload,
+            headers=headers,
+            timeout=10
+        )
+        response.raise_for_status()
+        print(f"[INFO] Email sent to {recipients}")
+    except requests.exceptions.RequestException as e:
+        print(f"[ERROR] Failed to send email: {e}, Response: {getattr(e.response, 'text', None)}")
 
+
+# -------------------- Specific Email Functions -------------------- #
 
 def send_email_otp(target_email, otp_code):
     body = f"""
@@ -110,7 +119,8 @@ It expires in 5 minutes. Do not share this OTP with anyone.
 
 -ZSafe Security
 """
-    send_email("ZSafe Credential Reset OTP", body, target_email)
+    send_email_via_brevo("ZSafe Credential Reset OTP", body, target_email)
+
 
 def send_account_created_email(target_email):
     body = f"""
@@ -122,13 +132,10 @@ If this was not you, please secure your system immediately.
 
 – ZSafe Security
 """
-    send_email("ZSafe Account Created", body, target_email)
-
-
+    send_email_via_brevo("ZSafe Account Created", body, target_email)
 
 
 def send_intruder_email(image_base64, target_email, user_agent_string=None, ip_address=None):
-    DEVELOPER_EMAIL = "chizotamubochi@gmail.com"
     body = f"""
 SECURITY ALERT!
 
@@ -148,13 +155,20 @@ A photo of the intruder is attached.
             encoded = image_base64
         image_data = base64.b64decode(encoded)
         attachments.append({
-            'data': image_data,
-            'filename': 'intruder.jpg'
+            "filename": "intruder.jpg",
+            "content": base64.b64encode(image_data).decode(),
+            "type": "image/jpeg"
         })
     except Exception as e:
         print(f"[ERROR] Failed to decode attachment: {e}")
 
-    send_email("SECURITY ALERT: Intruder Detected", body, [target_email, DEVELOPER_EMAIL], attachments)
+    send_email_via_brevo(
+        "SECURITY ALERT: Intruder Detected",
+        body,
+        [target_email, DEVELOPER_EMAIL],
+        attachments
+    )
+
 
 
 
@@ -226,7 +240,6 @@ def register_device(email, device_id):
         print(f"[DB ERROR] register_device failed: {e}")
 
 def send_new_device_email(target_email, token):
-    DEVELOPER_EMAIL = "chizotamubochi@gmail.com"
     NOT_YOU_LINK = f"https://yourrenderapp.com/device_alert/{token}"
     body = f"""
 Hello,
@@ -235,13 +248,17 @@ A login attempt from a new device was detected for your account.
 
 If this was you, please verify the OTP sent to your email.
 
-If this wasn't you, click here immediately to block your account and change your credential:
+If this wasn't you, click here immediately to block your account and change your credentials:
 
 {NOT_YOU_LINK}
 
 – ZSafe Security
 """
-    send_email("New Device Login Attempt", body, [target_email, DEVELOPER_EMAIL])
+    send_email_via_brevo(
+        "New Device Login Attempt",
+        body,
+        [target_email, DEVELOPER_EMAIL]
+    )
 
 
 #  INDEX 
