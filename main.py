@@ -330,11 +330,31 @@ def setup():
             cursor.close()
             db.close()
 
+            # --- Register this device immediately ---
+            device_id = request.cookies.get("device_id")
+            if not device_id:
+                ua = request.user_agent.string
+                random_part = str(random.randint(100000, 999999))
+                device_id = hashlib.sha256(f"{ua}-{random_part}".encode()).hexdigest()
+
+            register_device(email, device_id)
+
             # Send account created email in a separate thread
             threading.Thread(target=send_account_created_email, args=(email,), daemon=True).start()
 
+            # Prepare response to redirect and set cookie
+            response = redirect("/login")
+            response.set_cookie(
+                "device_id",
+                device_id,
+                max_age=60*60*24*365,  # 1 year
+                secure=True,            # HTTPS only
+                httponly=True,          # JS cannot access
+                samesite="Lax"
+            )
+
             flash("Account created. Please login.", "success")
-            return redirect("/login")
+            return response
 
         except Exception as e:
             print(f"[DB ERROR] setup failed: {e}")
@@ -342,6 +362,7 @@ def setup():
             return redirect("/setup")
 
     return render_template("app.html", page="setup")
+
 
 
 
