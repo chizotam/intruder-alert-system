@@ -240,7 +240,10 @@ def register_device(email, device_id):
         print(f"[DB ERROR] register_device failed: {e}")
 
 def send_new_device_email(target_email, token):
-    NOT_YOU_LINK = f"https://yourrenderapp.com/device_alert/{token}"
+    # Use actual domain from environment variable or fallback
+    site_url = os.environ.get("SITE_URL", "https://yourrenderapp.com")  # set SITE_URL in Render
+    NOT_YOU_LINK = f"{site_url}/device_alert/{token}"
+
     body = f"""
 Hello,
 
@@ -259,6 +262,7 @@ If this wasn't you, click here immediately to block your account and change your
         body,
         [target_email, DEVELOPER_EMAIL]
     )
+
 
 
 #  INDEX 
